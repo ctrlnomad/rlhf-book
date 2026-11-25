@@ -23,46 +23,41 @@ from .buffer import Experience
 def approx_kl3(
     log_probs: torch.Tensor, log_probs_ref: torch.Tensor, action_mask: torch.Tensor
 ) -> torch.Tensor:
-    """Monte-Carlo approximation of KL divergence (k3 estimator).
+    """TODO: k3 estimator of KL(pi || pi_ref) for tokens sampled from pi.
 
-    Uses ``r = pi_ref / pi`` so that ``r - log(r) - 1`` estimates
-    ``KL(pi || pi_ref)`` for samples drawn from ``pi``.
-
+    With r = pi_ref / pi, the estimator is  r - log(r) - 1.
+    Use torch.expm1 rather than exp(...) - 1 for numerical stability near r = 1
+    (tests/test_kl3_stability.py checks this).
+    Masked-out positions must come out as exactly 0: zero the log-ratio with
+    action_mask (when it is not None) before applying the formula.
+    Returns (B, S).
     See: http://joschu.net/blog/kl-approx.html
     """
-    log_ratio = log_probs_ref - log_probs
-    if action_mask is not None:
-        log_ratio = log_ratio * action_mask
-    return torch.expm1(log_ratio) - log_ratio
+    raise NotImplementedError("TODO: implement approx_kl3")
 
 
 def approx_kl2(
     log_probs: torch.Tensor, log_probs_ref: torch.Tensor, action_mask: torch.Tensor
 ) -> torch.Tensor:
-    """Monte-Carlo approximation of KL divergence (k2 estimator).
+    """TODO: k2 estimator of KL(pi || pi_ref):  (log(pi / pi_ref))^2 / 2.
 
+    Zero the log-ratio with action_mask (when it is not None). Returns (B, S).
     See: http://joschu.net/blog/kl-approx.html
     """
-    log_ratio = log_probs - log_probs_ref
-    if action_mask is not None:
-        log_ratio = log_ratio * action_mask
-    return (log_ratio**2) / 2
+    raise NotImplementedError("TODO: implement approx_kl2")
 
 
 def approx_kl1(
     log_probs: torch.Tensor, log_probs_ref: torch.Tensor, action_mask: torch.Tensor
 ) -> torch.Tensor:
-    """Monte-Carlo approximation of KL divergence (k1 estimator).
+    """TODO: k1 estimator of KL(pi || pi_ref):  log(pi / pi_ref).
 
-    Samples are drawn from ``pi``, so the estimator of ``KL(pi || pi_ref)``
-    is ``log(pi / pi_ref)``.
-
+    Samples come from pi, so the ratio is policy over reference
+    (tests/test_kl3_stability.py checks the sign).
+    Zero the log-ratio with action_mask (when it is not None). Returns (B, S).
     See: http://joschu.net/blog/kl-approx.html
     """
-    log_ratio = log_probs - log_probs_ref
-    if action_mask is not None:
-        log_ratio = log_ratio * action_mask
-    return log_ratio
+    raise NotImplementedError("TODO: implement approx_kl1")
 
 
 def get_approx_kl(
@@ -113,25 +108,30 @@ class GRPOLoss(nn.Module):
         self.kl_estimator = kl_estimator
 
     def forward(self, log_probs: torch.Tensor, experience: Experience, **kwargs) -> torch.Tensor:
-        # Policy loss with clipping
-        ratio = (log_probs - experience.log_probs_old).exp()
-        unclipped_term = ratio * experience.advantages
-        clipped_term = (
-            ratio.clamp(1 - self.clip_eps_lo, 1 + self.clip_eps_hi) * experience.advantages
-        )
-        policy_loss = -torch.min(unclipped_term, clipped_term)
+        """TODO: GRPO loss (also used for Dr. GRPO; they differ only in the advantages).
 
-        # Optional KL penalty
-        if self.beta:
-            kl_loss = get_approx_kl(
-                self.kl_estimator, log_probs, experience.log_probs_ref, experience.action_mask
-            )
-        else:
-            kl_loss = torch.tensor(0.0, device=log_probs.device, dtype=torch.float32)
+        experience.advantages: (B, 1), one scalar per completion, broadcast to every token.
+        Per token: importance ratio pi / pi_old (from log_probs and
+        experience.log_probs_old), then the PPO-style clipped surrogate with
+        clip range [1 - clip_eps_lo, 1 + clip_eps_hi]. Remember the loss is the
+        NEGATIVE of the objective you want to maximise.
 
-        loss = policy_loss + self.beta * kl_loss
-        loss = masked_mean(loss, mask=experience.action_mask, dim=-1).mean(dim=0)
-        return loss
+        Optional KL penalty: if self.beta > 0, add self.beta * (per-token KL estimate from
+        get_approx_kl(self.kl_estimator, log_probs, experience.log_probs_ref, action_mask))
+        to the per-token loss before reducing.
+
+        Shapes (B = sequences in the batch, S = sequence length - 1):
+          log_probs, log_probs_old, log_probs_ref: (B, S) float, log-prob of each next token
+          action_mask: (B, S) bool, True only on generated (completion) tokens;
+                       prompt tokens (left) and padding are False
+
+        Reduction convention used throughout this repo (the checker expects it):
+          per-token loss (B, S) -> masked_mean(..., mask=action_mask, dim=-1) -> (B,) -> .mean(dim=0)
+        i.e. average over each sequence's completion tokens, then over sequences.
+        `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
+        Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
+        """
+        raise NotImplementedError("TODO: implement GRPOLoss.forward")
 
 
 class GSPOLoss(nn.Module):
@@ -150,27 +150,29 @@ class GSPOLoss(nn.Module):
         self.kl_estimator = kl_estimator
 
     def forward(self, log_probs: torch.Tensor, experience: Experience, **kwargs) -> torch.Tensor:
-        # Sequence-level ratio (average log prob difference)
-        seq_logprobs = masked_mean(
-            log_probs - experience.log_probs_old, mask=experience.action_mask, dim=-1, keepdim=True
-        ).exp()
-        unclipped_term = seq_logprobs * experience.advantages
-        clipped_term = (
-            seq_logprobs.clamp(1 - self.clip_eps_lo, 1 + self.clip_eps_hi) * experience.advantages
-        )
-        policy_loss = -torch.min(unclipped_term, clipped_term)
+        """TODO: GSPO loss: like GRPO, but the importance ratio is per SEQUENCE.
 
-        # Optional KL penalty
-        if self.beta:
-            kl_loss = get_approx_kl(
-                self.kl_estimator, log_probs, experience.log_probs_ref, experience.action_mask
-            )
-        else:
-            kl_loss = torch.tensor(0.0, device=log_probs.device, dtype=torch.float32)
+        Sequence ratio = exp(mean over completion tokens of (log_probs - log_probs_old)),
+        i.e. the geometric mean of the token ratios, shape (B, 1).
+        Clip and form the surrogate with that sequence ratio and the (B, 1) advantages,
+        the same way GRPO does per token.
 
-        loss = policy_loss + self.beta * kl_loss
-        loss = masked_mean(loss, mask=experience.action_mask, dim=-1).mean(dim=0)
-        return loss
+        Optional KL penalty: if self.beta > 0, add self.beta * (per-token KL estimate from
+        get_approx_kl(self.kl_estimator, log_probs, experience.log_probs_ref, action_mask))
+        to the per-token loss before reducing.
+
+        Shapes (B = sequences in the batch, S = sequence length - 1):
+          log_probs, log_probs_old, log_probs_ref: (B, S) float, log-prob of each next token
+          action_mask: (B, S) bool, True only on generated (completion) tokens;
+                       prompt tokens (left) and padding are False
+
+        Reduction convention used throughout this repo (the checker expects it):
+          per-token loss (B, S) -> masked_mean(..., mask=action_mask, dim=-1) -> (B,) -> .mean(dim=0)
+        i.e. average over each sequence's completion tokens, then over sequences.
+        `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
+        Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
+        """
+        raise NotImplementedError("TODO: implement GSPOLoss.forward")
 
 
 class ReinforceLoss(nn.Module):
@@ -184,9 +186,24 @@ class ReinforceLoss(nn.Module):
         super().__init__()
 
     def forward(self, log_probs: torch.Tensor, experience: Experience, **kwargs) -> torch.Tensor:
-        loss = -(log_probs * experience.advantages)
-        loss = masked_mean(loss, mask=experience.action_mask, dim=-1).mean(dim=0)
-        return loss
+        """TODO: REINFORCE loss (also used for RLOO; they differ only in the advantages).
+
+        The policy-gradient surrogate whose gradient is -A * grad log pi.
+        experience.advantages is (B, 1): the reward (REINFORCE) or the
+        leave-one-out advantage (RLOO). No clipping, no ratio.
+
+        Shapes (B = sequences in the batch, S = sequence length - 1):
+          log_probs, log_probs_old, log_probs_ref: (B, S) float, log-prob of each next token
+          action_mask: (B, S) bool, True only on generated (completion) tokens;
+                       prompt tokens (left) and padding are False
+
+        Reduction convention used throughout this repo (the checker expects it):
+          per-token loss (B, S) -> masked_mean(..., mask=action_mask, dim=-1) -> (B,) -> .mean(dim=0)
+        i.e. average over each sequence's completion tokens, then over sequences.
+        `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
+        Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
+        """
+        raise NotImplementedError("TODO: implement ReinforceLoss.forward")
 
 
 class MaxRLLoss(nn.Module):
@@ -200,9 +217,23 @@ class MaxRLLoss(nn.Module):
         super().__init__()
 
     def forward(self, log_probs: torch.Tensor, experience: Experience, **kwargs) -> torch.Tensor:
-        loss = -(log_probs * experience.advantages)
-        loss = masked_mean(loss, mask=experience.action_mask, dim=-1).mean(dim=0)
-        return loss
+        """TODO: MaxRL loss.
+
+        Same functional form as REINFORCE; what makes MaxRL different lives in
+        compute_maxrl_advantages (utils.py). experience.advantages is (B, 1).
+
+        Shapes (B = sequences in the batch, S = sequence length - 1):
+          log_probs, log_probs_old, log_probs_ref: (B, S) float, log-prob of each next token
+          action_mask: (B, S) bool, True only on generated (completion) tokens;
+                       prompt tokens (left) and padding are False
+
+        Reduction convention used throughout this repo (the checker expects it):
+          per-token loss (B, S) -> masked_mean(..., mask=action_mask, dim=-1) -> (B,) -> .mean(dim=0)
+        i.e. average over each sequence's completion tokens, then over sequences.
+        `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
+        Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
+        """
+        raise NotImplementedError("TODO: implement MaxRLLoss.forward")
 
 
 class CISPOLoss(nn.Module):
@@ -222,23 +253,31 @@ class CISPOLoss(nn.Module):
         self.kl_estimator = kl_estimator
 
     def forward(self, log_probs: torch.Tensor, experience: Experience, **kwargs) -> torch.Tensor:
-        # Stop gradient on clipped ratio
-        with torch.no_grad():
-            ratio = (log_probs - experience.log_probs_old).exp()
-            clipped_ratio = ratio.clamp(1 - self.clip_eps_lo, 1 + self.clip_eps_hi)
-        policy_loss = -clipped_ratio * experience.advantages * log_probs
+        """TODO: CISPO loss.
 
-        # Optional KL penalty
-        if self.beta:
-            kl_loss = get_approx_kl(
-                self.kl_estimator, log_probs, experience.log_probs_ref, experience.action_mask
-            )
-        else:
-            kl_loss = torch.tensor(0.0, device=log_probs.device, dtype=torch.float32)
+        Compute the token ratio pi / pi_old and clip it to
+        [1 - clip_eps_lo, 1 + clip_eps_hi], but treat the clipped ratio as a
+        CONSTANT weight (no gradient flows through it). Multiply it by the
+        advantage and by log_probs, REINFORCE-style. Unlike PPO/GRPO, clipped
+        tokens still get a gradient. experience.advantages is (B, 1).
+        The checker compares gradients, so a missing stop-gradient will fail.
 
-        loss = policy_loss + self.beta * kl_loss
-        loss = masked_mean(loss, mask=experience.action_mask, dim=-1).mean(dim=0)
-        return loss
+        Optional KL penalty: if self.beta > 0, add self.beta * (per-token KL estimate from
+        get_approx_kl(self.kl_estimator, log_probs, experience.log_probs_ref, action_mask))
+        to the per-token loss before reducing.
+
+        Shapes (B = sequences in the batch, S = sequence length - 1):
+          log_probs, log_probs_old, log_probs_ref: (B, S) float, log-prob of each next token
+          action_mask: (B, S) bool, True only on generated (completion) tokens;
+                       prompt tokens (left) and padding are False
+
+        Reduction convention used throughout this repo (the checker expects it):
+          per-token loss (B, S) -> masked_mean(..., mask=action_mask, dim=-1) -> (B,) -> .mean(dim=0)
+        i.e. average over each sequence's completion tokens, then over sequences.
+        `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
+        Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
+        """
+        raise NotImplementedError("TODO: implement CISPOLoss.forward")
 
 
 class SAPOLoss(nn.Module):
@@ -259,27 +298,31 @@ class SAPOLoss(nn.Module):
         self.kl_estimator = kl_estimator
 
     def forward(self, log_probs: torch.Tensor, experience: Experience, **kwargs) -> torch.Tensor:
-        # Token-level importance ratio
-        ratio = (log_probs - experience.log_probs_old).exp()
+        """TODO: SAPO loss: replace hard clipping with a smooth sigmoid gate.
 
-        # Asymmetric temperature: tighter curve for negative advantages
-        temps = torch.where(experience.advantages > 0, self.sapo_temp_pos, self.sapo_temp_neg)
+        Per token, with ratio r = pi / pi_old and advantage A ((B, 1), broadcast):
+          tau  = self.sapo_temp_pos where A > 0, else self.sapo_temp_neg
+          gate = sigmoid(tau * (r - 1)) * 4 / tau
+          per-token policy loss = -gate * A
+        (At r = 1 the gate's derivative is 1, so on-policy it matches the
+        vanilla policy gradient; it fades out as r moves away from 1.)
 
-        # Soft sigmoid gate
-        soft_gate = torch.sigmoid(temps * (ratio - 1)) * 4 / temps
-        policy_loss = -soft_gate * experience.advantages
+        Optional KL penalty: if self.beta > 0, add self.beta * (per-token KL estimate from
+        get_approx_kl(self.kl_estimator, log_probs, experience.log_probs_ref, action_mask))
+        to the per-token loss before reducing.
 
-        # Optional KL penalty (default for SAPO = 0)
-        if self.beta:
-            kl_loss = get_approx_kl(
-                self.kl_estimator, log_probs, experience.log_probs_ref, experience.action_mask
-            )
-        else:
-            kl_loss = torch.tensor(0.0, device=log_probs.device, dtype=torch.float32)
+        Shapes (B = sequences in the batch, S = sequence length - 1):
+          log_probs, log_probs_old, log_probs_ref: (B, S) float, log-prob of each next token
+          action_mask: (B, S) bool, True only on generated (completion) tokens;
+                       prompt tokens (left) and padding are False
 
-        loss = policy_loss + self.beta * kl_loss
-        loss = masked_mean(loss, mask=experience.action_mask, dim=-1).mean(dim=0)
-        return loss
+        Reduction convention used throughout this repo (the checker expects it):
+          per-token loss (B, S) -> masked_mean(..., mask=action_mask, dim=-1) -> (B,) -> .mean(dim=0)
+        i.e. average over each sequence's completion tokens, then over sequences.
+        `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
+        Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
+        """
+        raise NotImplementedError("TODO: implement SAPOLoss.forward")
 
 
 class PPOLoss(nn.Module):
@@ -306,31 +349,33 @@ class PPOLoss(nn.Module):
     def forward(
         self, log_probs: torch.Tensor, experience: Experience, values: torch.Tensor, **kwargs
     ) -> torch.Tensor:
-        # Value loss with clipping
-        values = values.to(log_probs.device)
-        returns = (
-            experience.advantages + experience.values_old
-        )  # A_t = G_t - V(s_t) => G_t = A_t + V(s_t)
-        values_clipped = torch.clamp(
-            values,
-            experience.values_old - self.clip_eps_val,
-            experience.values_old + self.clip_eps_val,
-        )
-        val_unclipped_term = 0.5 * (returns - values) ** 2
-        val_clipped_term = 0.5 * (returns - values_clipped) ** 2
-        val_loss = torch.max(val_unclipped_term, val_clipped_term)
+        """TODO: PPO loss = clipped policy surrogate + vf_coef * clipped value loss.
 
-        # Policy loss with clipping
-        policy_ratio = (log_probs - experience.log_probs_old).exp()
-        policy_unclipped_term = policy_ratio * experience.advantages
-        policy_clipped_term = (
-            policy_ratio.clamp(1 - self.clip_eps_lo, 1 + self.clip_eps_hi) * experience.advantages
-        )
-        policy_loss = -torch.min(policy_unclipped_term, policy_clipped_term)
+        Here experience.advantages is PER TOKEN, shape (B, S) (from GAE), and
+        values / experience.values_old are (B, S) value-head outputs.
+        Policy part: same clipped surrogate as GRPO, with
+          [1 - clip_eps_lo, 1 + clip_eps_hi].
+        Value part:
+          returns = advantages + values_old          (since A = G - V)
+          clip the new values to within +-clip_eps_val of values_old
+          value loss per token = 0.5 * max(squared error unclipped,
+                                           squared error clipped)  against returns
+        Combine per token: policy + self.vf_coef * value, then reduce. No KL term here
+        (PPO's KL penalty goes into the reward, see apply_reward_kl in utils.py).
+        The checker also compares d(loss)/d(values).
 
-        loss = policy_loss + self.vf_coef * val_loss
-        loss = masked_mean(loss, mask=experience.action_mask, dim=-1).mean(dim=0)
-        return loss
+        Shapes (B = sequences in the batch, S = sequence length - 1):
+          log_probs, log_probs_old, log_probs_ref: (B, S) float, log-prob of each next token
+          action_mask: (B, S) bool, True only on generated (completion) tokens;
+                       prompt tokens (left) and padding are False
+
+        Reduction convention used throughout this repo (the checker expects it):
+          per-token loss (B, S) -> masked_mean(..., mask=action_mask, dim=-1) -> (B,) -> .mean(dim=0)
+        i.e. average over each sequence's completion tokens, then over sequences.
+        `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
+        Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
+        """
+        raise NotImplementedError("TODO: implement PPOLoss.forward")
 
 
 class DAPOLoss(nn.Module):
@@ -346,14 +391,20 @@ class DAPOLoss(nn.Module):
         self.clip_eps_hi = clip_eps_hi
 
     def forward(self, log_probs: torch.Tensor, experience: Experience, **kwargs) -> torch.Tensor:
-        # Policy loss with clipping
-        ratio = (log_probs - experience.log_probs_old).exp()
-        unclipped_term = ratio * experience.advantages
-        clipped_term = (
-            ratio.clamp(1 - self.clip_eps_lo, 1 + self.clip_eps_hi) * experience.advantages
-        )
-        per_token_loss = -torch.min(unclipped_term, clipped_term)
-        mask = experience.action_mask.to(per_token_loss.dtype)
-        total_tokens = mask.sum().clamp(1e-8)
-        total_loss = (per_token_loss * mask).sum()
-        return total_loss / total_tokens
+        """TODO: DAPO loss: GRPO's clipped surrogate with two changes.
+
+        1. Clip-higher: the range is [1 - clip_eps_lo, 1 + clip_eps_hi] with
+           clip_eps_hi > clip_eps_lo (0.2 / 0.28 in the config). Same code as GRPO.
+        2. Token-level normalisation: NOT the repo's usual per-sequence mean.
+           Sum the per-token loss over ALL completion tokens in the batch and
+           divide by the total number of completion tokens (clamp the count to at
+           least 1e-8). Long sequences therefore weigh more.
+        No KL term. experience.advantages is (B, 1).
+        Return a scalar tensor.
+
+        Shapes (B = sequences in the batch, S = sequence length - 1):
+          log_probs, log_probs_old, log_probs_ref: (B, S) float, log-prob of each next token
+          action_mask: (B, S) bool, True only on generated (completion) tokens;
+                       prompt tokens (left) and padding are False
+        """
+        raise NotImplementedError("TODO: implement DAPOLoss.forward")

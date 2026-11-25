@@ -167,10 +167,11 @@ class RolloutEngine:
         return exp
 
     def _dapo_filter(self, exp: Experience) -> Experience | None:
-        """Drop the group if every completion has min or max correctness."""
-        correctness = exp.rewards["correctness"]
-        all_min = (correctness == self.cfg.accuracy_min_reward).all()
-        all_max = (correctness == self.cfg.accuracy_max_reward).all()
-        if all_min or all_max:
-            return None
-        return exp
+        """TODO: DAPO dynamic sampling: drop groups that carry no learning signal.
+
+        exp.rewards["correctness"] is (G, 1) for one prompt's group.
+        If EVERY completion scored self.cfg.accuracy_min_reward, or EVERY one
+        scored self.cfg.accuracy_max_reward, return None (the group is dropped;
+        its standardised advantages would all be 0). Otherwise return exp.
+        """
+        raise NotImplementedError("TODO: implement RolloutEngine._dapo_filter")
