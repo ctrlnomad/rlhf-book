@@ -33,7 +33,11 @@ def approx_kl3(
     Returns (B, S).
     See: http://joschu.net/blog/kl-approx.html
     """
-    raise NotImplementedError("TODO: implement approx_kl3")
+    logr = log_probs_ref - log_probs
+    if action_mask is not None:
+        logr = logr * action_mask
+    kl3 = torch.expm1(logr) - logr
+    return kl3
 
 
 def approx_kl2(
@@ -44,7 +48,10 @@ def approx_kl2(
     Zero the log-ratio with action_mask (when it is not None). Returns (B, S).
     See: http://joschu.net/blog/kl-approx.html
     """
-    raise NotImplementedError("TODO: implement approx_kl2")
+    logr = log_probs - log_probs_ref
+    if action_mask is not None:
+        logr = logr * action_mask
+    return logr ** 2 / 2
 
 
 def approx_kl1(
@@ -57,7 +64,10 @@ def approx_kl1(
     Zero the log-ratio with action_mask (when it is not None). Returns (B, S).
     See: http://joschu.net/blog/kl-approx.html
     """
-    raise NotImplementedError("TODO: implement approx_kl1")
+    logr = log_probs - log_probs_ref
+    if action_mask is not None:
+        logr = logr * action_mask
+    return logr
 
 
 def get_approx_kl(
@@ -131,7 +141,15 @@ class GRPOLoss(nn.Module):
         `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
         Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
         """
-        raise NotImplementedError("TODO: implement GRPOLoss.forward")
+        ratio = torch.exp(log_probs - experience.log_probs_old)
+        clip_term = torch.clip(ratio, 1-self.clip_eps_lo, 1+self.clip_eps_hi)
+        grpo_token_loss = torch.min(ratio * experience.advantages, clip_term * experience.advantages)
+        if self.beta > 0:
+            kl_loss = get_approx_kl(self.kl_estimator, log_probs, experience.log_probs_ref, experience.action_mask)
+            # - sign: we should be careful to negate the penalty here to force the policy to stay close to the reference
+            grpo_token_loss -= self.beta * kl_loss
+        grpo_loss = masked_mean(grpo_token_loss, experience.action_mask, dim=-1).mean(dim=0)
+        return -grpo_loss
 
 
 class GSPOLoss(nn.Module):
@@ -152,8 +170,6 @@ class GSPOLoss(nn.Module):
     def forward(self, log_probs: torch.Tensor, experience: Experience, **kwargs) -> torch.Tensor:
         """TODO: GSPO loss: like GRPO, but the importance ratio is per SEQUENCE.
 
-        Sequence ratio = exp(mean over completion tokens of (log_probs - log_probs_old)),
-        i.e. the geometric mean of the token ratios, shape (B, 1).
         Clip and form the surrogate with that sequence ratio and the (B, 1) advantages,
         the same way GRPO does per token.
 
@@ -172,7 +188,17 @@ class GSPOLoss(nn.Module):
         `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
         Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
         """
-        raise NotImplementedError("TODO: implement GSPOLoss.forward")
+        log_diff = log_probs - experience.log_probs_old
+        # when computing the mean we should be careful to only include the tokens that the model generated, not the padding or prompt tokens
+        ratio = masked_mean(log_diff, experience.action_mask, dim=-1).exp().view(-1, 1)
+        clip_term = torch.clip(ratio, 1-self.clip_eps_lo, 1+self.clip_eps_hi)
+        gspo_token_loss = torch.min(ratio * experience.advantages, clip_term * experience.advantages)
+        if self.beta > 0:
+            kl_loss = get_approx_kl(self.kl_estimator, log_probs, experience.log_probs_ref, experience.action_mask)
+            # -= will not work here as it modifies the tensor *in place* and does not allow broadcasting shapes
+            gspo_token_loss = gspo_token_loss - self.beta * kl_loss
+        gspo_loss = masked_mean(gspo_token_loss, experience.action_mask, dim=-1).mean(dim=0)
+        return -gspo_loss
 
 
 class ReinforceLoss(nn.Module):
@@ -203,7 +229,9 @@ class ReinforceLoss(nn.Module):
         `masked_mean` and `get_approx_kl` at the top of this file are there for you to use.
         Return a scalar tensor. The checker compares the loss value AND d(loss)/d(log_probs).
         """
-        raise NotImplementedError("TODO: implement ReinforceLoss.forward")
+        reinforce_loss = masked_mean(experience.advantages * log_probs, experience.action_mask, dim=-1).mean()
+        return - reinforce_loss
+        
 
 
 class MaxRLLoss(nn.Module):

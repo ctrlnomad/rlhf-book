@@ -181,7 +181,16 @@ def apply_reward_kl(
     Move log_probs / log_probs_ref / action_mask to rewards["total"].device first.
     rewards["total"] is (B, 1). Return the (modified) rewards TensorDict.
     """
-    raise NotImplementedError("TODO: implement apply_reward_kl")
+    if not cfg.beta or cfg.loss not in ["ppo", "rloo", "reinforce"]:
+        return rewards
+    device = rewards["total"].device
+    log_probs = log_probs.to(device)
+    log_probs_ref = log_probs_ref.to(device)
+    action_mask = action_mask.to(device)
+    kl = get_approx_kl(cfg.kl_estimator, log_probs, log_probs_ref, action_mask)  # (B, S)
+    kl = masked_mean(kl, mask=action_mask, dim=-1, keepdim=True)  # (B, 1) per-sequence KL
+    rewards["total"] = rewards["total"] - cfg.beta * kl
+    return rewards
 
 
 def compute_standardized_advantages(rewards: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -192,7 +201,9 @@ def compute_standardized_advantages(rewards: torch.Tensor, eps: float = 1e-8) ->
     Use torch's default std (the unbiased, N - 1 version). Returns (G, 1).
     Used by GRPO, GSPO, CISPO, SAPO, DAPO.
     """
-    raise NotImplementedError("TODO: implement compute_standardized_advantages")
+    mean = rewards.mean(dim=0, keepdim=True)
+    std = rewards.std(dim=0, keepdim=True)  # unbiased (N - 1)
+    return (rewards - mean) / (std + eps)
 
 
 def compute_maxrl_advantages(binary_reward: torch.Tensor) -> torch.Tensor:
@@ -203,7 +214,12 @@ def compute_maxrl_advantages(binary_reward: torch.Tensor) -> torch.Tensor:
     reward (its success rate) instead of by the std. If the group has no
     successes (mean == 0), every advantage is 0. Returns (G, 1).
     """
-    raise NotImplementedError("TODO: implement compute_maxrl_advantages")
+    success_rate = binary_reward.mean(dim=0, keepdim=True)
+    return torch.where(
+        success_rate > 0,
+        (binary_reward - success_rate) / success_rate,
+        torch.zeros_like(binary_reward),
+    )
 
 
 def compute_nonstandardized_advantages(rewards: torch.Tensor) -> torch.Tensor:
@@ -211,7 +227,7 @@ def compute_nonstandardized_advantages(rewards: torch.Tensor) -> torch.Tensor:
 
     rewards: (G, 1) for one prompt's group. Returns (G, 1).
     """
-    raise NotImplementedError("TODO: implement compute_nonstandardized_advantages")
+    return rewards - rewards.mean(dim=0, keepdim=True)
 
 
 def compute_loo_advantages(rewards: torch.Tensor) -> torch.Tensor:
@@ -222,7 +238,9 @@ def compute_loo_advantages(rewards: torch.Tensor) -> torch.Tensor:
     A_i = r_i - mean_{j != i} r_j. (Try to write it without a loop; there's a
     closed form in terms of the full-group mean.) Returns (G, 1).
     """
-    raise NotImplementedError("TODO: implement compute_loo_advantages")
+    # r_i - mean_{j != i} r_j  ==  K / (K - 1) * (r_i - mean_j r_j)
+    K = rewards.shape[0]
+    return (K / (K - 1)) * (rewards - rewards.mean(dim=0, keepdim=True))
 
 
 def compute_gae(
@@ -247,7 +265,27 @@ def compute_gae(
       - Finally multiply by action_mask.
       It is fine to loop over t (S is small); vectorise over the batch.
     """
-    raise NotImplementedError("TODO: implement compute_gae")
+    B, S = action_mask.shape
+    device = action_mask.device
+    # Index of each sequence's last completion token: cumsum peaks there first.
+    last_idx = action_mask.long().cumsum(dim=-1).argmax(dim=-1, keepdim=True)  # (B, 1)
+    positions = torch.arange(S, device=device).unsqueeze(0)  # (1, S)
+    done = (positions >= last_idx).float()  # terminal at and after the last token
+    # Sparse reward: the scalar reward sits on the last completion token.
+    token_rewards = torch.zeros(B, S, device=device, dtype=torch.float32)
+    token_rewards.scatter_(dim=-1, index=last_idx, src=rewards.to(device, torch.float32))
+    values = values.to(device, torch.float32)
+
+    advantages = torch.zeros(B, S, device=device, dtype=torch.float32)
+    next_value = torch.zeros(B, device=device)
+    running = torch.zeros(B, device=device)
+    for t in reversed(range(S)):
+        not_done = 1.0 - done[:, t]
+        delta = token_rewards[:, t] + not_done * gamma * next_value - values[:, t]
+        running = delta + not_done * gamma * lam * running
+        advantages[:, t] = running
+        next_value = values[:, t]
+    return advantages * action_mask
 
 
 def compute_advantages(
